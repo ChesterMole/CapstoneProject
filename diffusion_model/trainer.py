@@ -301,7 +301,7 @@ class Trainer(object):
         self.batch_size = train_batch_size
         self.train_num_steps = train_num_steps
 
-        self.epoch_steps = len(dataset) // (self.batch_size)
+        self.epoch_steps = len(dataset) // (self.batch_size*self.gradient_accumulate_every)
 
         self.dl = cycle(data.DataLoader(
             self.ds,

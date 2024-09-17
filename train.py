@@ -9,9 +9,20 @@ from diffusion_model.trainer import GaussianDiffusion, Trainer
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 
+import os
+from glob import glob
+import re
+
+# Input arguments
+parser = argparse.ArgumentParser()
+parser.add_argument('-r', '--resume_iteration', type=int, default=-1)
+args = parser.parse_args()
+
+resume_iteration = args.resume_iteration
+
 # Testing Dataset Information
-input_folder = "dataset/linearTest"
-input_size = 28
+input_folder = "dataset/TumorfreeTrajectory_1"
+input_size = 640
 
 def scale_to_minus_one_to_one(tensor):
     return (tensor * 2) - 1
@@ -51,6 +62,18 @@ diffusion = GaussianDiffusion(
     loss_type = 'l1'    # L1 or L2
 ).cuda()
 
+# resume diffusion model
+if resume_iteration > -1:
+    path = os.path.realpath(os.path.join(os.getcwd(), os.path.dirname(__file__)))
+    weight_check = os.path.join(path, 'results','results-'+str(resume_iteration), '*.pt')
+    weight_paths = glob(weight_check)
+    weight_path = sorted(weight_paths, key=lambda x: int(re.findall(r'\d+', x)[-1]))[-1]
+    
+    weight = torch.load(weight_path, map_location='cuda')
+    diffusion.load_state_dict(weight['ema'])
+    print("Model Loaded!")
+# -
+
 # Trainer Object
 trainer = Trainer(
     diffusion,
@@ -59,7 +82,7 @@ trainer = Trainer(
     save_and_sample_every=100,
     train_num_steps = 10000,
     fp16 = True,
-    results_iteration = 11
+    results_iteration = resume_iteration
 )
 
 def main():

@@ -12,7 +12,7 @@ from .fp16_util import convert_module_to_f16, convert_module_to_f32
 from .modules import *
 
 NUM_CLASSES = 10
-LINEAR_DIM = 3
+LINEAR_DIM = 6
 
 class UNetModel(nn.Module):
     """
@@ -321,7 +321,9 @@ def create_model(
     out_channels=3,
 ):
     if channel_mult == "":
-        if image_size == 512:
+        if image_size == 640:
+            channel_mult = (0.5, 1, 1.5, 2, 2, 4, 4)
+        elif image_size == 512:
             channel_mult = (0.5, 1, 1, 2, 2, 4, 4)
         elif image_size == 256:
             channel_mult = (1, 1, 2, 2, 4, 4)
