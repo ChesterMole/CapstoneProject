@@ -15,6 +15,9 @@ import time
 from pathlib import Path
 import os
 
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+
 
 
 torch.cuda.empty_cache()
@@ -47,6 +50,13 @@ def default(val, d):
     if exists(val):
         return val
     return d() if isfunction(d) else d
+
+def display(tensor):
+    image_np = tensor.numpy()
+    image_np = (image_np - image_np.min()) / (image_np.max() - image_np.min())
+    print(image_np.shape)
+    plt.axis('off')  # Hide axis
+    plt.show()
 
 # small helper modules
 
@@ -163,8 +173,8 @@ class GaussianDiffusion(nn.Module):
         posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def p_mean_variance(self, x, t, clip_denoised: bool, c = None):
-        x_recon = self.predict_start_from_noise(x, t=t, noise=self.denoise_fn(torch.cat([x, c], 1), t))
+    def p_mean_variance(self, x, t, clip_denoised: bool, c = None, l = None):    
+        x_recon = self.predict_start_from_noise(x, t=t, noise=self.denoise_fn(torch.cat([x, c], 1), t, y=l))
 
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
@@ -173,16 +183,17 @@ class GaussianDiffusion(nn.Module):
         return model_mean, posterior_variance, posterior_log_variance
 
     @torch.no_grad()
-    def p_sample(self, x, t, condition_tensors=None, clip_denoised=True, repeat_noise=False):
+    def p_sample(self, x, t, condition_tensors=None, clip_denoised=True, repeat_noise=False, condition_labels=None):
         b, *_, device = *x.shape, x.device
-        model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, c=condition_tensors, clip_denoised=clip_denoised)
+        model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, c=condition_tensors, clip_denoised=clip_denoised, l=condition_labels)
         noise = noise_like(x.shape, device, repeat_noise)
         # no noise when t == 0
+
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
     @torch.no_grad()
-    def p_sample_loop(self, shape, condition_tensors=None):
+    def p_sample_loop(self, shape, condition_tensors=None, condition_labels=None):
         device = self.betas.device
         b = shape[0]
         img = torch.randn(shape, device=device)
@@ -190,15 +201,19 @@ class GaussianDiffusion(nn.Module):
         # Looping through timesteps in reverse order
         for i in tqdm(reversed(range(self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             t = torch.full((b,), i, device=device, dtype=torch.long)
-            img = self.p_sample(img, t, condition_tensors=condition_tensors)
+            img = self.p_sample(img, t, condition_tensors=condition_tensors, condition_labels=condition_labels)
 
         return img
 
     @torch.no_grad()
-    def sample(self, batch_size = 16, condition_tensors = None):
+    def sample(self, batch_size = 16, conditions = None): 
+        condition_tensors = conditions[0]
+        condition_labels = conditions[1]
+        condition_tensors = torch.zeros_like(condition_tensors).cuda() 
+        print(condition_labels)
         image_size = self.image_size
         channels = self.channels
-        return self.p_sample_loop((batch_size, channels, image_size, image_size), condition_tensors = condition_tensors)
+        return self.p_sample_loop((batch_size, channels, image_size, image_size), condition_tensors = condition_tensors, condition_labels = condition_labels)
 
     @torch.no_grad()
     def interpolate(self, x1, x2, t = None, lam = 0.5):
@@ -224,13 +239,17 @@ class GaussianDiffusion(nn.Module):
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
         )
 
-    def p_losses(self, x_start, t, condition_tensors = None, noise = None):
+    def p_losses(self, x_start, t, condition_label = None, condition_tensors = None, noise = None):
         b, c, h, w = x_start.shape
         noise = default(noise, lambda: torch.randn_like(x_start.float()))
         
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        x_recon = self.denoise_fn(torch.cat([x_noisy, condition_tensors], 1), t)
-
+        
+        if condition_tensors == None:
+            condition_tensors = torch.zeros(b, c, h, w).cuda()  
+        
+        x_recon = self.denoise_fn(torch.cat([x_noisy, condition_tensors], 1), t, y=condition_label)
+        
         if self.loss_type == 'l1':
             loss = (noise - x_recon).abs().mean()
         elif self.loss_type == 'l2':
@@ -240,17 +259,13 @@ class GaussianDiffusion(nn.Module):
 
         return loss
 
-    def forward(self, x, condition_tensors=None, *args, **kwargs):
+    def forward(self, x, condition_label=None, condition_tensors=None, *args, **kwargs):
         b, c, h, w = *x.shape,
         device = x.device
         img_size = self.image_size
-
-        if condition_tensors == None:
-            condition_tensors = torch.full([*x.shape], 255).cuda()
-
         assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
-        return self.p_losses(x, t, condition_tensors=condition_tensors, *args, **kwargs)
+        return self.p_losses(x, t, condition_tensors=condition_tensors,condition_label=condition_label, *args, **kwargs)
 
 # trainer class
 
@@ -268,7 +283,8 @@ class Trainer(object):
         train_num_steps = 100000,
         gradient_accumulate_every = 2,
         save_and_sample_every = 1000,
-        results_folder = 'results'
+        results_folder = 'results',
+        results_iteration = '1'
     ):
         self.model = diffusion_model
         self.ema = EMA(ema_decay)
@@ -312,8 +328,7 @@ class Trainer(object):
             i += 1
             self.results_path = os.path.join(results_parent_path, f'results-{i}')'''
 
-        i=2
-        self.results_path = os.path.join(results_parent_path, f'results-{i}')
+        self.results_path = os.path.join(results_parent_path, f'results-{results_iteration}')
         if not os.path.exists(self.results_path):
             os.makedirs(self.results_path)
 
@@ -353,24 +368,28 @@ class Trainer(object):
         while self.step < self.train_num_steps:
             for i in range(self.gradient_accumulate_every):
                 data = next(self.dl)
-                input_tensors = data.cuda()
+                input_tensors = data['input'].cuda()
+                input_label = data['label'].cuda()
+                
                 self.opt.zero_grad()
 
                 if self.fp16:
                     with torch.autocast(device_type='cuda', dtype=torch.float16):
-                        output = self.model(input_tensors)
+                        output = self.model(input_tensors, condition_label=input_label)
                         loss = output.sum()/self.batch_size
                         self.scaler.scale(loss/self.gradient_accumulate_every).backward()
                 else:
-                    output = self.model(input_tensors, input_tensors)
+                    output = self.model(input_tensors, condition_label=input_label)
                     loss = output.sum()/self.batch_size
                     (loss / self.gradient_accumulate_every).backward()
                                 
                 print(f'{self.step}: {loss.item()}')
             
-            self.scaler.step(self.opt)
-            self.scaler.update()
-            #self.opt.step()
+            if self.fp16:
+                self.scaler.step(self.opt)
+                self.scaler.update()
+            else:
+                self.opt.step()
             self.opt.zero_grad()
 
             if self.step % self.update_ema_every == 0:
@@ -380,11 +399,18 @@ class Trainer(object):
                 milestone = self.step // self.save_and_sample_every
                 batches = num_to_groups(4, self.batch_size)
                 
-                all_images_list = list(map(lambda n: self.ema_model.sample(batch_size=n, condition_tensors=self.ds.sample_conditions(batch_size=n)), batches))
+                all_images_list = list(map(
+                    lambda n: self.ema_model.sample(
+                        batch_size=n,
+                        conditions = self.ds.sample_conditions(batch_size=n)
+                    ),
+                    batches
+                ))
 
                 all_images = torch.cat(all_images_list, dim=0)
                 all_images = (all_images + 1) * 0.5
-                print("Joing")
+                
+                print("Joining")
                 location = str(os.path.join(self.results_path, f'sample-{milestone}.png'))
                 utils.save_image(all_images, location, nrow = 2)
                 self.save(milestone)
@@ -392,7 +418,7 @@ class Trainer(object):
                 print("SAVED")
             
             # Epoch Time Print
-            if ((self.step % self.epoch_steps) == 0) and (self.step != 0):
+            '''if ((self.step % self.epoch_steps) == 0) and (self.step != 0):
                 epoch_no = int(self.step / self.epoch_steps)
 
                 current_time = time.time()
@@ -400,7 +426,7 @@ class Trainer(object):
 
                 print(f'Epoch {epoch_no}: Time = {epoch_time}')
 
-                epoch_time = current_time
+                epoch_time = current_time'''
 
             self.step += 1
 

@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from .fp16_util import convert_module_to_f16, convert_module_to_f32
 from .modules import *
 
-NUM_CLASSES = 1
+NUM_CLASSES = 10
 
 class UNetModel(nn.Module):
     """
@@ -250,6 +250,9 @@ class UNetModel(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
 
+    def sample():
+        print("FUSHA")
+
     def forward(self, x, timesteps, y=None):
         """
         Apply the model to an input batch.
@@ -268,11 +271,12 @@ class UNetModel(nn.Module):
         if self.num_classes is not None:
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
-        
+
         h = x.type(self.dtype)
         for module in self.input_blocks:
             h = module(h, emb)
             hs.append(h)
+
         h = self.middle_block(h, emb)
 
         for module in self.output_blocks:
