@@ -78,7 +78,7 @@ if resume_iteration > -1:
 trainer = Trainer(
     diffusion,
     dataset,
-    train_batch_size=64,
+    train_batch_size=8,
     save_and_sample_every=100,
     train_num_steps = 10000,
     fp16 = True,
