@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 
 # Testing Dataset Information
-input_folder = "dataset/sample"
-input_size = 64
+input_folder = "dataset/linearTest"
+input_size = 28
 
 def scale_to_minus_one_to_one(tensor):
     return (tensor * 2) - 1
@@ -40,7 +40,7 @@ out_channels = 3
 num_channels = 64
 num_res_blocks = 2
 
-model = create_model(input_size, num_channels, num_res_blocks, class_cond=True).cuda()
+model = create_model(input_size, num_channels, num_res_blocks, class_cond=True, linear_cond=True).cuda()
 
 timesteps = 250
 
@@ -55,11 +55,11 @@ diffusion = GaussianDiffusion(
 trainer = Trainer(
     diffusion,
     dataset,
-    train_batch_size=32,
-    save_and_sample_every=100,#10,
-    train_num_steps = 10000,#30,
+    train_batch_size=64,
+    save_and_sample_every=100,
+    train_num_steps = 10000,
     fp16 = True,
-    results_iteration = 1
+    results_iteration = 11
 )
 
 def main():

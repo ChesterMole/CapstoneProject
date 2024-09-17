@@ -12,6 +12,7 @@ from .fp16_util import convert_module_to_f16, convert_module_to_f32
 from .modules import *
 
 NUM_CLASSES = 10
+LINEAR_DIM = 3
 
 class UNetModel(nn.Module):
     """
@@ -56,6 +57,7 @@ class UNetModel(nn.Module):
         conv_resample=True,
         dims=2,
         num_classes=None,
+        linear_dim=None,
         use_checkpoint=False,
         use_fp16=False,
         num_heads=1,
@@ -80,6 +82,7 @@ class UNetModel(nn.Module):
         self.channel_mult = channel_mult
         self.conv_resample = conv_resample
         self.num_classes = num_classes
+        self.linear_dim = linear_dim
         self.use_checkpoint = use_checkpoint
         self.dtype = th.float16 if use_fp16 else th.float32
         self.num_heads = num_heads
@@ -95,6 +98,9 @@ class UNetModel(nn.Module):
 
         if self.num_classes is not None:
             self.label_emb = nn.Embedding(num_classes, time_embed_dim)
+
+        if self.linear_dim is not None:
+            self.linear_emb = nn.Linear(self.linear_dim, time_embed_dim)
 
         ch = input_ch = int(channel_mult[0] * model_channels)
         self.input_blocks = nn.ModuleList(
@@ -253,7 +259,7 @@ class UNetModel(nn.Module):
     def sample():
         print("FUSHA")
 
-    def forward(self, x, timesteps, y=None):
+    def forward(self, x, timesteps, y=None, l=None):
         """
         Apply the model to an input batch.
         :param x: an [N x C x ...] Tensor of inputs.
@@ -265,12 +271,19 @@ class UNetModel(nn.Module):
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
 
+        assert (l is not None) == (
+            self.linear_dim is not None
+        ), "must specify l if and only if the model is linear-conditional"
+
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
 
         if self.num_classes is not None:
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
+
+        if self.linear_dim is not None:
+            emb = emb + self.linear_emb(l)
 
         h = x.type(self.dtype)
         for module in self.input_blocks:
@@ -293,6 +306,7 @@ def create_model(
     channel_mult="",
     learn_sigma=False,
     class_cond=False,
+    linear_cond=False,
     use_checkpoint=False,
     attention_resolutions="16",
     num_heads=1,
@@ -315,10 +329,13 @@ def create_model(
             channel_mult = (1, 1, 2, 3, 4)
         elif image_size == 64:
             channel_mult = (1, 2, 3, 4)
+        elif image_size == 28:
+            channel_mult = (1, 2, 3)
         else:
             raise ValueError(f"unsupported image size: {image_size}")
     else:
         channel_mult = tuple(int(ch_mult) for ch_mult in channel_mult.split(","))
+        print(channel_mult)
 
     attention_ds = []
     for res in attention_resolutions.split(","):
@@ -334,6 +351,7 @@ def create_model(
         dropout=dropout,
         channel_mult=channel_mult,
         num_classes=(NUM_CLASSES if class_cond else None),
+        linear_dim=(LINEAR_DIM if linear_cond else None),
         use_checkpoint=use_checkpoint,
         use_fp16=use_fp16,
         num_heads=num_heads,

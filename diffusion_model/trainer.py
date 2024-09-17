@@ -173,8 +173,8 @@ class GaussianDiffusion(nn.Module):
         posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def p_mean_variance(self, x, t, clip_denoised: bool, c = None, l = None):    
-        x_recon = self.predict_start_from_noise(x, t=t, noise=self.denoise_fn(torch.cat([x, c], 1), t, y=l))
+    def p_mean_variance(self, x, t, clip_denoised: bool, c = None, label_tensors=None, linear_tensors=None):    
+        x_recon = self.predict_start_from_noise(x, t=t, noise=self.denoise_fn(torch.cat([x, c], 1), t, y=label_tensors, l=linear_tensors))
 
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
@@ -183,9 +183,9 @@ class GaussianDiffusion(nn.Module):
         return model_mean, posterior_variance, posterior_log_variance
 
     @torch.no_grad()
-    def p_sample(self, x, t, condition_tensors=None, clip_denoised=True, repeat_noise=False, condition_labels=None):
+    def p_sample(self, x, t, condition_tensors=None, clip_denoised=True, repeat_noise=False, label_tensors=None, linear_tensors=None):
         b, *_, device = *x.shape, x.device
-        model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, c=condition_tensors, clip_denoised=clip_denoised, l=condition_labels)
+        model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, c=condition_tensors, clip_denoised=clip_denoised, label_tensors=label_tensors, linear_tensors=linear_tensors)
         noise = noise_like(x.shape, device, repeat_noise)
         # no noise when t == 0
 
@@ -193,7 +193,7 @@ class GaussianDiffusion(nn.Module):
         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
     @torch.no_grad()
-    def p_sample_loop(self, shape, condition_tensors=None, condition_labels=None):
+    def p_sample_loop(self, shape, condition_tensors=None, label_tensors=None, linear_tensors=None):
         device = self.betas.device
         b = shape[0]
         img = torch.randn(shape, device=device)
@@ -201,19 +201,19 @@ class GaussianDiffusion(nn.Module):
         # Looping through timesteps in reverse order
         for i in tqdm(reversed(range(self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             t = torch.full((b,), i, device=device, dtype=torch.long)
-            img = self.p_sample(img, t, condition_tensors=condition_tensors, condition_labels=condition_labels)
+            img = self.p_sample(img, t, condition_tensors=condition_tensors, label_tensors=label_tensors, linear_tensors=linear_tensors)
 
         return img
 
     @torch.no_grad()
-    def sample(self, batch_size = 16, conditions = None): 
+    def sample(self, batch_size = 16, conditions = None):
         condition_tensors = conditions[0]
-        condition_labels = conditions[1]
-        condition_tensors = torch.zeros_like(condition_tensors).cuda() 
-        print(condition_labels)
+        label_tensors = conditions[1]
+        linear_tensors = conditions[2]
+        condition_tensors = torch.zeros_like(condition_tensors).cuda()
         image_size = self.image_size
         channels = self.channels
-        return self.p_sample_loop((batch_size, channels, image_size, image_size), condition_tensors = condition_tensors, condition_labels = condition_labels)
+        return self.p_sample_loop((batch_size, channels, image_size, image_size), condition_tensors=condition_tensors, label_tensors=label_tensors, linear_tensors=linear_tensors)
 
     @torch.no_grad()
     def interpolate(self, x1, x2, t = None, lam = 0.5):
@@ -239,7 +239,7 @@ class GaussianDiffusion(nn.Module):
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
         )
 
-    def p_losses(self, x_start, t, condition_label = None, condition_tensors = None, noise = None):
+    def p_losses(self, x_start, t, condition_label = None, condition_tensors = None, linear_tensors=None, noise = None):
         b, c, h, w = x_start.shape
         noise = default(noise, lambda: torch.randn_like(x_start.float()))
         
@@ -248,7 +248,7 @@ class GaussianDiffusion(nn.Module):
         if condition_tensors == None:
             condition_tensors = torch.zeros(b, c, h, w).cuda()  
         
-        x_recon = self.denoise_fn(torch.cat([x_noisy, condition_tensors], 1), t, y=condition_label)
+        x_recon = self.denoise_fn(torch.cat([x_noisy, condition_tensors], 1), t, y=condition_label, l=linear_tensors)
         
         if self.loss_type == 'l1':
             loss = (noise - x_recon).abs().mean()
@@ -259,13 +259,13 @@ class GaussianDiffusion(nn.Module):
 
         return loss
 
-    def forward(self, x, condition_label=None, condition_tensors=None, *args, **kwargs):
+    def forward(self, x, condition_label=None, condition_tensors=None, linear_tensors=None, *args, **kwargs):
         b, c, h, w = *x.shape,
         device = x.device
         img_size = self.image_size
         assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
-        return self.p_losses(x, t, condition_tensors=condition_tensors,condition_label=condition_label, *args, **kwargs)
+        return self.p_losses(x, t, condition_tensors=condition_tensors,condition_label=condition_label, linear_tensors=linear_tensors,*args, **kwargs)
 
 # trainer class
 
@@ -301,7 +301,7 @@ class Trainer(object):
         self.batch_size = train_batch_size
         self.train_num_steps = train_num_steps
 
-        self.epoch_steps = int(len(dataset) / (self.batch_size))
+        self.epoch_steps = len(dataset) // (self.batch_size)
 
         self.dl = cycle(data.DataLoader(
             self.ds,
@@ -370,12 +370,13 @@ class Trainer(object):
                 data = next(self.dl)
                 input_tensors = data['input'].cuda()
                 input_label = data['label'].cuda()
+                input_linear_cond = data['linear_condition'].cuda()
                 
                 self.opt.zero_grad()
 
                 if self.fp16:
                     with torch.autocast(device_type='cuda', dtype=torch.float16):
-                        output = self.model(input_tensors, condition_label=input_label)
+                        output = self.model(input_tensors, condition_label=input_label, linear_tensors=input_linear_cond)
                         loss = output.sum()/self.batch_size
                         self.scaler.scale(loss/self.gradient_accumulate_every).backward()
                 else:
@@ -418,15 +419,15 @@ class Trainer(object):
                 print("SAVED")
             
             # Epoch Time Print
-            '''if ((self.step % self.epoch_steps) == 0) and (self.step != 0):
+            if ((self.step % self.epoch_steps) == 0) and (self.step != 0):
                 epoch_no = int(self.step / self.epoch_steps)
-
+                
                 current_time = time.time()
-                epoch_time = (epoch_time - current_time)/3600
+                epoch_time = (current_time-epoch_time)/60
 
-                print(f'Epoch {epoch_no}: Time = {epoch_time}')
+                print(f'Epoch {epoch_no}: Time = {epoch_time} mins')
 
-                epoch_time = current_time'''
+                epoch_time = current_time
 
             self.step += 1
 
