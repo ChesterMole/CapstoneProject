@@ -296,15 +296,18 @@ class Trainer(object):
         self.step_start_ema = step_start_ema
 
         self.gradient_accumulate_every = gradient_accumulate_every
-        self.ds = dataset
         self.train_lr = train_lr
         self.batch_size = train_batch_size
         self.train_num_steps = train_num_steps
 
-        self.epoch_steps = len(dataset) // (self.batch_size*self.gradient_accumulate_every)
+        self.train_dataset = dataset.train
+        self.validation_dataset = dataset.validation
+        self.test_dataset = dataset.test
+
+        self.epoch_steps = len(self.train_dataset) // (self.batch_size*self.gradient_accumulate_every)
 
         self.dl = cycle(data.DataLoader(
-            self.ds,
+            self.train_dataset,
             batch_size=train_batch_size, 
             shuffle=True, 
             pin_memory=True,
@@ -403,7 +406,7 @@ class Trainer(object):
                 all_images_list = list(map(
                     lambda n: self.ema_model.sample(
                         batch_size=n,
-                        conditions = self.ds.sample_conditions(batch_size=n)
+                        conditions = self.train_dataset.sample_conditions(batch_size=n)
                     ),
                     batches
                 ))

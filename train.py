@@ -21,7 +21,7 @@ args = parser.parse_args()
 resume_iteration = args.resume_iteration
 
 # Testing Dataset Information
-input_folder = "dataset/TumorfreeTrajectory_1"
+input_folder = "dataset/LowCam"
 input_size = 640
 
 def scale_to_minus_one_to_one(tensor):
@@ -78,8 +78,8 @@ if resume_iteration > -1:
 trainer = Trainer(
     diffusion,
     dataset,
-    train_batch_size=8,
-    save_and_sample_every=100,
+    train_batch_size=2,
+    save_and_sample_every=1,
     train_num_steps = 10000,
     fp16 = True,
     results_iteration = resume_iteration
