@@ -284,7 +284,8 @@ class Trainer(object):
         gradient_accumulate_every = 2,
         save_and_sample_every = 1000,
         results_folder = 'results',
-        results_iteration = '1'
+        results_iteration = '1',
+        validation_every = 10
     ):
         self.model = diffusion_model
         self.ema = EMA(ema_decay)
@@ -294,6 +295,7 @@ class Trainer(object):
         self.save_and_sample_every = save_and_sample_every
 
         self.step_start_ema = step_start_ema
+        self.validation_every = validation_every
 
         self.gradient_accumulate_every = gradient_accumulate_every
         self.train_lr = train_lr
@@ -314,26 +316,33 @@ class Trainer(object):
             num_workers=4,  # Adjust based on your system
             persistent_workers=True
         ))
-        self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
+        self.dl_val = cycle(data.DataLoader(
+            self.validation_dataset,
+            batch_size=train_batch_size, 
+            shuffle=True, 
+            pin_memory=True,
+            num_workers=4,  # Adjust based on your system
+            persistent_workers=True
+        ))
 
-        self.step = 0
+        self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
 
         self.fp16 = fp16
         if fp16:
-            self.scaler = torch.cuda.amp.GradScaler()
+            self.scaler = torch.amp.GradScaler()
         
         path = os.path.realpath(os.path.join(os.getcwd(), os.path.dirname(__file__)))
         results_parent_path =  os.path.join(path, '..', results_folder)
 
-        '''i = 1
-        self.results_path = os.path.join(results_parent_path, f'results-{i}')
-        while os.path.exists(self.results_path):
-            i += 1
-            self.results_path = os.path.join(results_parent_path, f'results-{i}')'''
-
         self.results_path = os.path.join(results_parent_path, f'results-{results_iteration}')
         if not os.path.exists(self.results_path):
             os.makedirs(self.results_path)
+
+        # Track Loss
+        self.train_loss = []
+        self.val_loss = []
+
+        self.step = 0
 
     def reset_parameters(self):
         self.ema_model.load_state_dict(self.model.state_dict())
@@ -364,45 +373,68 @@ class Trainer(object):
     def train(self):
         print("Training Started")
 
-        backwards = partial(loss_backwards, self.fp16)
+        # Track computation time
         start_time = time.time()
         epoch_time = time.time()
 
         while self.step < self.train_num_steps:
+            # Clear gradients before accumulation
+            self.opt.zero_grad()
+
             for i in range(self.gradient_accumulate_every):
+                # Get training data batch
                 data = next(self.dl)
                 input_tensors = data['input'].cuda()
                 input_label = data['label'].cuda()
                 input_linear_cond = data['linear_condition'].cuda()
                 
-                self.opt.zero_grad()
-
                 if self.fp16:
+                    # Forward pass
                     with torch.autocast(device_type='cuda', dtype=torch.float16):
                         output = self.model(input_tensors, condition_label=input_label, linear_tensors=input_linear_cond)
                         loss = output.sum()/self.batch_size
+
+                        # Scale the loss and backpropagate
                         self.scaler.scale(loss/self.gradient_accumulate_every).backward()
                 else:
-                    output = self.model(input_tensors, condition_label=input_label)
+                    # Forward pass
+                    output = self.model(input_tensors, condition_label=input_label, linear_tensors=input_linear_cond)
                     loss = output.sum()/self.batch_size
+
+                    # Scale the loss and backpropagate
                     (loss / self.gradient_accumulate_every).backward()
-                                
+                
+                # Print & Track Loss
                 print(f'{self.step}: {loss.item()}')
+                self.train_loss.append((self.step,loss.item()))
             
+            # Step/update optimiser, scaler and ema
             if self.fp16:
                 self.scaler.step(self.opt)
                 self.scaler.update()
             else:
                 self.opt.step()
-            self.opt.zero_grad()
 
             if self.step % self.update_ema_every == 0:
                 self.step_ema()
 
-            if self.step != 0 and self.step % self.save_and_sample_every == 0:
-                milestone = self.step // self.save_and_sample_every
-                batches = num_to_groups(4, self.batch_size)
+            # Calculate Validation Loss
+            if self.step % self.validation_every == 0:
+                with torch.autocast(device_type='cuda', dtype=torch.float16):
+                    output = self.model(input_tensors, condition_label=input_label, linear_tensors=input_linear_cond)
+                    loss = output.sum()/self.batch_size
                 
+                # Print & Track Validation Loss
+                print(f'Validation - {self.step}: {loss.item()}')
+                self.val_loss.append((self.step,loss.item()))
+
+            # Save Model
+            if self.step != 0 and self.step % self.save_and_sample_every == 0:
+                # Milestone no.
+                milestone = self.step // self.save_and_sample_every
+
+                # Get example batches & generate
+                batches = num_to_groups(4, self.batch_size)
                 all_images_list = list(map(
                     lambda n: self.ema_model.sample(
                         batch_size=n,
@@ -411,15 +443,16 @@ class Trainer(object):
                     batches
                 ))
 
+                # Collect and format
                 all_images = torch.cat(all_images_list, dim=0)
                 all_images = (all_images + 1) * 0.5
                 
-                print("Joining")
+                # Save
                 location = str(os.path.join(self.results_path, f'sample-{milestone}.png'))
                 utils.save_image(all_images, location, nrow = 2)
                 self.save(milestone)
 
-                print("SAVED")
+                print(f"Saved Model Milestone {milestone}")
             
             # Epoch Time Print
             if ((self.step % self.epoch_steps) == 0) and (self.step != 0):
@@ -434,7 +467,25 @@ class Trainer(object):
 
             self.step += 1
 
+        # Save Loss
+        self.save_loss()
+
         print("Training Completed")
         end_time = time.time()
         execution_time = (end_time - start_time)/3600
-        print(execution_time)
+        print(f'Execution Time: {execution_time} hr')
+    
+    def save_loss(self):
+        # Get paths
+        train_loss_path = str(os.path.join(self.results_path, "train_loss.txt"))
+        val_loss_path = str(os.path.join(self.results_path, "val_loss.txt"))
+
+        # Write inputs to file
+        with open(train_loss_path, 'w') as file:
+            for item in self.train_loss:
+                file.write(f"{item}\n")
+        with open(val_loss_path, 'w') as file:
+            for item in self.val_loss:
+                file.write(f"{item}\n")
+
+        print("Loss Values Saved")

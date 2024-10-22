@@ -63,10 +63,11 @@ def main():
         diffusion,
         dataset,
         train_batch_size=2,
-        save_and_sample_every=1,
-        train_num_steps = 10000,
+        save_and_sample_every=10,
+        train_num_steps = 10,
         fp16 = True,
-        results_iteration = results_iteration
+        results_iteration = results_iteration,
+        validation_every = 2
     )
 
     # Train
