@@ -18,8 +18,6 @@ import os
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 
-
-
 torch.cuda.empty_cache()
 
 def cycle(dl):
